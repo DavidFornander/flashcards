@@ -23,6 +23,11 @@ View your app in AI Studio: https://ai.studio/apps/drive/1mp6JdLYNjY1mCSIEQ-0Bgt
 
 This app is configured to automatically deploy to GitHub Pages when changes are pushed to the `main` branch.
 
+**⚠️ Security Note:** This app uses the Gemini API key on the client side. When deploying to GitHub Pages, the API key will be embedded in the built JavaScript files. For production use, consider:
+- Using API key restrictions in the Google Cloud Console to limit usage to your domain
+- Implementing a backend proxy to keep the API key secure on the server side
+- Monitoring API usage to detect unauthorized access
+
 ### Setup Deployment
 
 1. Go to your repository settings on GitHub
