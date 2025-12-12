@@ -1,0 +1,17 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package*.json ./
+RUN npm ci
+
+# Copy source code
+COPY . .
+
+# Expose port
+EXPOSE 8101
+
+# Use ts-node for hot reload (no build step needed in dev)
+CMD ["npx", "ts-node", "src/index.ts"]
+

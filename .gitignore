@@ -42,6 +42,13 @@ backend/.env.local
 backend/prisma/*.db
 backend/prisma/*.db-journal
 
+# Firebase service account credentials (NEVER commit these!)
+**/*-firebase-adminsdk-*.json
+**/service-account-key.json
+**/serviceAccountKey.json
+backend/secrets/
+**/secrets/
+
 # OS
 .DS_Store
 Thumbs.db

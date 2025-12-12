@@ -4,10 +4,12 @@ import DeckView from './components/ModuleDisplay'; // Using the same file, but i
 import Header from './components/Header';
 import QuizPractice from './components/QuizPractice';
 import { storageManager } from './services/srs';
+import { api } from './services/api';
 import { Deck, Card, SRSSettings } from './types';
 import CreateDeckModal from './components/CreateDeckModal';
 import ImportCardsModal from './components/ImportCardsModal';
 import SettingsView from './components/SettingsView';
+import { defaultDeck, defaultCards } from './services/defaultData';
 
 type View = 'deck' | 'practice' | 'settings';
 type SortKey = 'easiness' | 'alphabetical';
@@ -22,19 +24,81 @@ function App() {
   const [isCreateDeckModalOpen, setIsCreateDeckModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>('easiness');
-  
+
   const [settings, setSettings] = useState<SRSSettings>(() => storageManager.loadSettings());
+  const [isMigrating, setIsMigrating] = useState(false);
+
+  const fetchData = async () => {
+    try {
+      const [loadedDecks, loadedCards] = await Promise.all([
+        api.getAllDecks(),
+        api.getAllCards()
+      ]);
+      setDecks(loadedDecks);
+      setCards(loadedCards);
+
+      return { loadedDecks, loadedCards };
+    } catch (error) {
+      console.error("Failed to fetch initial data", error);
+      return { loadedDecks: [], loadedCards: {} };
+    }
+  };
+
+  const performMigration = async (currentDecks: Deck[]) => {
+    if (currentDecks.length > 0) return; // Backend already has data
+
+    setIsMigrating(true);
+    try {
+      // Check LocalStorage for legacy data
+      const legacyDecks = storageManager.getAllDecks();
+
+      if (legacyDecks.length > 0) {
+        // Migrate Legacy Data
+        console.log("Migrating legacy data to backend...");
+        const legacyCards = storageManager.getAllCards();
+
+        for (const deck of legacyDecks) {
+          // Create deck on backend
+          const newDeck = await api.createDeck(deck.name);
+
+          // Find cards for this deck
+          const cardsForDeck = Object.values(legacyCards).filter(c => c.deckId === deck.id);
+          const formattedCards = cardsForDeck.map(c => ({
+            question: c.question,
+            answer: c.answer,
+            tags: c.tags
+          }));
+
+          if (formattedCards.length > 0) {
+            await api.createMultipleCards(newDeck.id, formattedCards, settings);
+          }
+        }
+        alert("Migration Complete! Your LocalStorage data has been moved to the database.");
+      } else {
+        // Seed Default Data (Clean Install)
+        console.log("Seeding default data to backend...");
+        const newDeck = await api.createDeck(defaultDeck.name);
+        await api.createMultipleCards(newDeck.id, defaultCards, settings);
+      }
+
+      // Refresh data after migration
+      const { loadedDecks, loadedCards } = await fetchData();
+      if (loadedDecks.length > 0 && !selectedDeckId) {
+        setSelectedDeckId(loadedDecks[0].id);
+      }
+
+    } catch (error) {
+      console.error("Migration failed", error);
+      alert("Migration failed. Please check console.");
+    } finally {
+      setIsMigrating(false);
+    }
+  };
 
   useEffect(() => {
-    storageManager.initializeDefaultData(); // Ensure default data exists on first load
-
-    const loadedDecks = storageManager.getAllDecks();
-    const loadedCards = storageManager.getAllCards();
-    setDecks(loadedDecks);
-    setCards(loadedCards);
-    if (loadedDecks.length > 0 && !selectedDeckId) {
-      setSelectedDeckId(loadedDecks[0].id);
-    }
+    fetchData().then(({ loadedDecks }) => {
+      performMigration(loadedDecks);
+    });
   }, []);
 
   useEffect(() => {
@@ -45,26 +109,26 @@ function App() {
     setIsCreateDeckModalOpen(true);
   };
 
-  const handleConfirmCreateDeck = (deckName: string) => {
-    const newDeck = storageManager.createDeck(deckName);
-    setDecks(prev => [...prev, newDeck]);
-    setSelectedDeckId(newDeck.id);
-    setView('deck');
-    setIsSidebarOpen(false); // For mobile
-    setIsCreateDeckModalOpen(false);
+  const handleConfirmCreateDeck = async (deckName: string) => {
+    try {
+      const newDeck = await api.createDeck(deckName);
+      setDecks(prev => [newDeck, ...prev]);
+      setSelectedDeckId(newDeck.id);
+      setView('deck');
+      setIsSidebarOpen(false); // For mobile
+      setIsCreateDeckModalOpen(false);
+    } catch (e) {
+      alert("Failed to create deck");
+    }
   };
 
-  const handleDeleteDeck = (deckId: string) => {
+  const handleDeleteDeck = async (deckId: string) => {
     if (window.confirm(`Are you sure you want to delete this deck and all its cards? This action cannot be undone.`)) {
-      storageManager.deleteDeck(deckId);
-      
-      const loadedDecks = storageManager.getAllDecks();
-      const loadedCards = storageManager.getAllCards();
-      setDecks(loadedDecks);
-      setCards(loadedCards);
-      
-      if (selectedDeckId === deckId) {
-        setSelectedDeckId(loadedDecks.length > 0 ? loadedDecks[0].id : null);
+      try {
+        await api.deleteDeck(deckId);
+        await fetchData(); // Reload all data to be safe and simple
+      } catch (e) {
+        alert("Failed to delete deck");
       }
     }
   };
@@ -82,81 +146,89 @@ function App() {
     setStudyingDeckId(null);
     setIsSidebarOpen(false);
   };
-  
-  const handleCreateCard = (deckId: string, question: string, answer: string) => {
-      const newCard = storageManager.createCard(deckId, question, answer, settings);
-      setCards(prev => ({...prev, [newCard.id]: newCard}));
+
+  const handleCreateCard = async (deckId: string, question: string, answer: string) => {
+    try {
+      const newCard = await api.createCard(deckId, question, answer, settings);
+      setCards(prev => ({ ...prev, [newCard.id]: newCard }));
+    } catch (e) {
+      alert("Failed to create card");
+    }
   };
 
-  const handleBulkCreateCards = (parsedCards: { question: string; answer: string; tags?: string[] }[]) => {
+  const handleBulkCreateCards = async (parsedCards: { question: string; answer: string; tags?: string[] }[]) => {
     if (!selectedDeckId) {
-        alert("Please select a deck first.");
-        return;
+      alert("Please select a deck first.");
+      return;
     }
-    const newCards = storageManager.createMultipleCards(selectedDeckId, parsedCards, settings);
-    
-    setCards(prev => {
-        const updatedCards = {...prev};
+    try {
+      const newCards = await api.createMultipleCards(selectedDeckId, parsedCards, settings);
+
+      setCards(prev => {
+        const updatedCards = { ...prev };
         newCards.forEach(card => {
-            updatedCards[card.id] = card;
+          updatedCards[card.id] = card;
         });
         return updatedCards;
-    });
+      });
 
-    setIsImportModalOpen(false);
+      setIsImportModalOpen(false);
+    } catch (e) {
+      alert("Failed to import cards");
+    }
   };
 
   const handleStudyDeck = (deckId: string) => {
-      const deckCards = Object.values(cards).filter((c: Card) => c.deckId === deckId);
-      if (deckCards.length > 0) {
-          setStudyingDeckId(deckId);
-          setView('practice');
-      } else {
-          alert("Add some cards to this deck before you can study!");
-      }
-  };
-  
-  const handleExitPractice = () => {
-      setView('deck');
-      setStudyingDeckId(null);
+    const deckCards = Object.values(cards).filter((c: Card) => c.deckId === deckId);
+    if (deckCards.length > 0) {
+      setStudyingDeckId(deckId);
+      setView('practice');
+    } else {
+      alert("Add some cards to this deck before you can study!");
+    }
   };
 
-  const handleUpdateCard = (updatedCard: Card) => {
-    storageManager.saveCard(updatedCard);
+  const handleExitPractice = () => {
+    setView('deck');
+    setStudyingDeckId(null);
+    fetchData(); // Refresh data to get latest nextReviewDates etc (though we update optimistic locally too)
+  };
+
+  const handleUpdateCard = async (updatedCard: Card) => {
+    // Optimistic update
     setCards(prevCards => ({
       ...prevCards,
       [updatedCard.id]: updatedCard
     }));
+
+    try {
+      await api.updateCard(updatedCard);
+    } catch (e) {
+      console.error("Failed to update card remotely", e);
+      // Could revert here if needed
+    }
   };
 
   const handleResetAllProgress = () => {
-    if (window.confirm("Are you absolutely sure? This will permanently delete ALL decks, cards, study progress, and settings.")) {
-        if (prompt("To confirm, please type 'DELETE' in all capital letters.") === "DELETE") {
-            storageManager.resetAllProgress();
-            window.location.reload();
-        } else {
-            alert("Reset cancelled. Confirmation phrase not matched.");
-        }
-    }
+    alert("This feature is currently disabled on the backend integration version.");
+    // We could implement a backend endpoint to wipe DB if really needed.
   };
-  
+
   const selectedDeck = useMemo(() => {
     const currentId = studyingDeckId || selectedDeckId;
     return decks.find(d => d.id === currentId) || null;
   }, [decks, selectedDeckId, studyingDeckId]);
 
   const cardsInSelectedDeck = useMemo(() => {
-      if (!selectedDeckId) return [];
-      const filteredCards = Object.values(cards).filter((c: Card) => c.deckId === selectedDeckId)
-      
-      if (sortKey === 'easiness') {
-        // Sort by easinessFactor ascending (lower is harder)
-        // FIX: Explicitly type sort callback arguments to resolve type inference issue.
-        return filteredCards.sort((a: Card, b: Card) => a.easinessFactor - b.easinessFactor);
-      } 
-      // 'alphabetical'
-      // FIX: Explicitly type sort callback arguments to resolve type inference issue.
-      return filteredCards.sort((a: Card, b: Card) => a.question.localeCompare(b.question));
+    if (!selectedDeckId) return [];
+    const filteredCards = Object.values(cards).filter((c: Card) => c.deckId === selectedDeckId)
+
+    if (sortKey === 'easiness') {
+      // Sort by easinessFactor ascending (lower is harder)
+      return filteredCards.sort((a: Card, b: Card) => a.easinessFactor - b.easinessFactor);
+    }
+    // 'alphabetical'
+    return filteredCards.sort((a: Card, b: Card) => a.question.localeCompare(b.question));
   }, [cards, selectedDeckId, sortKey]);
 
   const cardsForPractice = useMemo(() => {
@@ -165,35 +237,35 @@ function App() {
   }, [cards, studyingDeckId]);
 
   const renderMainContent = () => {
-      switch (view) {
-          case 'practice':
-              return <QuizPractice 
-                title={`Studying: ${selectedDeck?.name || 'Deck'}`}
-                questions={cardsForPractice}
-                settings={settings}
-                onExit={handleExitPractice}
-                onUpdateCard={handleUpdateCard}
-              />;
-          case 'settings':
-              return <SettingsView 
-                settings={settings}
-                setSettings={setSettings}
-                onResetAll={handleResetAllProgress}
-                cards={Object.values(cards)}
-                decks={decks}
-                />;
-          case 'deck':
-          default:
-              return <DeckView 
-                deck={selectedDeck}
-                cards={cardsInSelectedDeck}
-                onCreateCard={handleCreateCard}
-                onStudyDeck={handleStudyDeck}
-                onBulkAdd={() => setIsImportModalOpen(true)}
-                sortKey={sortKey}
-                onSortKeyChange={setSortKey}
-              />
-      }
+    switch (view) {
+      case 'practice':
+        return <QuizPractice
+          title={`Studying: ${selectedDeck?.name || 'Deck'}`}
+          questions={cardsForPractice}
+          settings={settings}
+          onExit={handleExitPractice}
+          onUpdateCard={handleUpdateCard}
+        />;
+      case 'settings':
+        return <SettingsView
+          settings={settings}
+          setSettings={setSettings}
+          onResetAll={handleResetAllProgress}
+          cards={Object.values(cards)}
+          decks={decks}
+        />;
+      case 'deck':
+      default:
+        return <DeckView
+          deck={selectedDeck}
+          cards={cardsInSelectedDeck}
+          onCreateCard={handleCreateCard}
+          onStudyDeck={handleStudyDeck}
+          onBulkAdd={() => setIsImportModalOpen(true)}
+          sortKey={sortKey}
+          onSortKeyChange={setSortKey}
+        />
+    }
   };
 
   return (
@@ -217,7 +289,7 @@ function App() {
           {renderMainContent()}
         </main>
       </div>
-      <CreateDeckModal 
+      <CreateDeckModal
         isOpen={isCreateDeckModalOpen}
         onClose={() => setIsCreateDeckModalOpen(false)}
         onCreate={handleConfirmCreateDeck}
